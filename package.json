@@ -1,16 +1,24 @@
 {
-  "name":"thistle-bundles",
-  "version":"6.0.0-alpha.1",
-  "private":true,
-  "type":"module",
-  "engines":{"node":">=22"},
-  "scripts":{
-    "start":"node server/index.js",
-    "migrate":"node server/migrate.js",
-    "test":"node --test tests/*.test.js server/*.test.js",
-    "dev":"shopify app dev",
-    "shopify:deploy":"shopify app deploy --force"
+  "name": "thistle-bundles",
+  "version": "6.0.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
   },
-  "dependencies":{"pg":"^8.16.3"},
-  "devDependencies":{"@shopify/cli":"^3.87.2"}
+  "scripts": {
+    "start": "node server/index.js",
+    "migrate": "node server/migrate.js",
+    "test": "node --test tests/*.test.js server/*.test.js",
+    "dev": "shopify app dev",
+    "shopify:deploy": "shopify app deploy --force"
+  },
+  "dependencies": {
+    "pg": "^8.16.3",
+    "preact": "^11.0.1",
+    "react": "^19.3.1"
+  },
+  "devDependencies": {
+    "@shopify/cli": "^3.87.2"
+  }
 }

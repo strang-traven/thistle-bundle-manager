@@ -1,8 +1,6 @@
-# Use `shopify app config link` to link the EXISTING Thistle Pre-Order Bundles app.
-# Replace placeholders after `fly launch`; do not reuse a different app's client ID.
-client_id = "REPLACE_WITH_EXISTING_BUNDLE_APP_CLIENT_ID"
+client_id = "1013a53870a625bd3d098d19148d266d"
 name = "Thistle Pre-Order Bundles"
-application_url = "https://REPLACE-WITH-YOUR-FLY-APP.fly.dev"
+application_url = "https://thistle-bundle-manager.fly.dev"
 embedded = true
 
 [build]
@@ -16,7 +14,7 @@ topics = ["orders/create", "orders/updated", "orders/cancelled", "orders/paid", 
 uri = "/webhooks/shopify"
 
 [access_scopes]
-scopes = "read_products,write_products,read_inventory,write_inventory,read_orders,read_locations,read_markets_home,read_cart_transforms,write_cart_transforms"
+scopes = "read_products,write_products,read_inventory,write_inventory,read_orders,read_fulfillments,read_locations,read_markets_home,read_cart_transforms,write_cart_transforms"
 
 [auth]
-redirect_urls = ["https://REPLACE-WITH-YOUR-FLY-APP.fly.dev/auth/callback"]
+redirect_urls = ["https://thistle-bundle-manager.fly.dev/auth/callback"]

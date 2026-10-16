@@ -1,4 +1,5 @@
 api_version = "2026-07"
+uid = "9d06ef39-fc8e-a26a-ab40-b3262c10b790a5c08d77"
 
 [[extensions]]
 name = "Thistle large pre-order bundle transform"
@@ -14,3 +15,4 @@ export = "cart-transform-run"
 [extensions.build]
 command = ""
 path = "dist/function.wasm"
+typegen_command = "true"

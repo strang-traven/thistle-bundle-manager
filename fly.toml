@@ -1,5 +1,5 @@
-# Change app to a globally unique name before running fly launch/deploy.
-app = "thistle-bundle-manager-your-unique-name"
+# Fly application configuration for Thistle Bundle Manager
+app = "thistle-bundle-manager"
 primary_region = "lhr"
 
 [build]

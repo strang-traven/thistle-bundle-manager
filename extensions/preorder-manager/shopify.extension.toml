@@ -1,4 +1,5 @@
 api_version = "2026-07"
+uid = "1e5758e7-da95-6d36-2ed3-4e9e20868df2ffaf7a70"
 
 [[extensions]]
 name = "Pre-Order Bundle Manager"
