@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="shopify-api-key" content="__SHOPIFY_API_KEY__">
+<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+<title>Thistle Bundle Manager</title>
+<style>body{font:14px system-ui,sans-serif;margin:0;color:#202124;background:#f8f8f8}main{max-width:1100px;margin:32px auto;padding:0 24px}h1{font-size:25px}h2{font-size:18px}section{background:#fff;border:1px solid #ddd;border-radius:12px;margin:16px 0;padding:20px}p{line-height:1.5}button{cursor:pointer;background:#154734;color:white;border:0;padding:10px 14px;border-radius:8px;margin:5px 8px 5px 0}button:disabled{opacity:.45}input{font:inherit;width:min(520px,90%);padding:11px;border:1px solid #aaa;border-radius:8px}.muted{color:#666}code{background:#f1f1f1;padding:2px 4px}pre{white-space:pre-wrap;word-break:break-word}.danger{color:#a01919}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:12px;border-bottom:1px solid #ddd}small{color:#666}</style></head>
+<body><main><h1>Thistle Bundle Manager <small>v6 Fly.io alpha</small></h1>
+<p>Host-managed pre-order ledger, historical order reconciliation and complete-set part planning. Stock mutations and checkout conversion are intentionally disabled until production checkout validation is implemented.</p>
+<section><h2>Shopify connection</h2><button id="connect">Connect Shopify offline access</button><span id="connection" class="muted">Checking…</span></section>
+<section><h2>Import an existing v5 card set</h2><p>Save the card list in the existing Shopify Pre-Order Bundle Manager first. Paste the parent <b>variant</b> ID, not the product ID.</p><input id="variant" placeholder="gid://shopify/ProductVariant/123456789"><div><button id="sync">Sync bundle to Fly.io</button></div></section>
+<section><h2>Bundle overview</h2><p class="muted">Outstanding pre-orders are calculated from Shopify order lines. The last-60-days API visibility limit may apply without read_all_orders.</p><div id="bundles"></div></section>
+<section><h2>Job history</h2><div id="jobs"></div></section><div id="message" role="status"></div></main>
+<script>
+const byId=id=>document.getElementById(id);
+const msg=(text,error=false)=>{byId('message').textContent=text;byId('message').className=error?'danger':'';};
+async function request(path,body){
+  if(!globalThis.shopify?.idToken)throw Error('Open this app inside Shopify Admin to authenticate');
+  const token=await globalThis.shopify.idToken();
+  const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:{Authorization:'Bearer '+token,...(body===undefined?{}:{'Content-Type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body)});
+  const data=await response.json();if(!response.ok)throw Error(data.error||'Request failed');return data;
+}
+function row(text){const td=document.createElement('td');td.textContent=String(text);return td;}
+function mkBtn(text,action){const b=document.createElement('button');b.textContent=text;b.onclick=()=>action().catch(e=>msg(e.message,true));return b;}
+function makeTable(columns,rows){const t=document.createElement('table'),tr=document.createElement('tr');for(const col of columns){const th=document.createElement('th');th.textContent=col;tr.append(th);}t.append(tr);for(const cells of rows){const tr=document.createElement('tr');for(const c of cells)tr.append(c instanceof Node?c:row(c));t.append(tr);}return t;}
+async function refresh(){try{
+ const data=await request('/api/admin/status');byId('connection').textContent=data.linked?'Connected to '+data.shop:'Not connected';
+ byId('bundles').replaceChildren(data.bundles.length?makeTable(['Product','SKU','Cards','Outstanding','Actions'],data.bundles.map(b=>[b.title,b.sku,b.card_count,b.outstanding,(()=>{const d=document.createElement('div');d.append(mkBtn('Reconcile orders',async()=>{await request('/api/admin/reconcile',{bundleId:b.id});msg('Order reconciliation queued');await refresh();}));d.append(mkBtn('See bundle parts',async()=>{const a=await request('/api/admin/part-plan?bundleId='+b.id);msg(`${a.totalCards} variants split into ${a.parts.length} native Shopify parts: ${a.parts.map(x=>x.count).join(' + ')} cards`);}));return d;})()])):document.createTextNode('No bundles imported yet.'));
+ byId('jobs').replaceChildren(data.jobs.length?makeTable(['Job','Status','Attempts','Last error'],data.jobs.map(j=>[j.kind,j.status,j.attempts,j.last_error||'—'])):document.createTextNode('No jobs recorded yet.'));
+}catch(e){msg(e.message,true);}}
+byId('connect').onclick=async()=>{try{await request('/api/admin/connect',{});msg('Connected successfully');await refresh();}catch(e){msg(e.message,true);}};
+byId('sync').onclick=async()=>{try{const d=await request('/api/admin/sync',{parentVariantId:byId('variant').value.trim()});msg(`Imported ${d.cards} card variants in ${d.parts} planned parts`);await refresh();}catch(e){msg(e.message,true);}};
+refresh();
+</script></body></html>

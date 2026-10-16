@@ -1,0 +1,6 @@
+{
+  "name": "thistle-preorder-cart-transform",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js"
+}

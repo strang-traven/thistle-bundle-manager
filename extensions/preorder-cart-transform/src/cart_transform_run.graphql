@@ -1,0 +1,19 @@
+query Input {
+  cart {
+    lines {
+      id
+      merchandise {
+        __typename
+        ... on ProductVariant {
+          id
+          liveEnabled: metafield(namespace: "tt_preorders", key: "live_enabled") {
+            value
+          }
+          liveConfig: metafield(namespace: "tt_preorders", key: "live_components") {
+            jsonValue
+          }
+        }
+      }
+    }
+  }
+}
