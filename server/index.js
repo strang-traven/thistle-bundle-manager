@@ -80,7 +80,7 @@ export function makeHandler(database=pool,{getHtml=()=>readFile(htmlPath,'utf8')
    if(url.pathname.startsWith('/api/admin/')){
      const {shop}=await auth(req);
      if(req.method==='GET'&&url.pathname==='/api/admin/status'){
-       const bundles=await database.query(`SELECT b.id,b.parent_variant_id,b.title,b.sku,b.mode,b.reconciled_at,jsonb_array_length(b.components) AS card_count,b.synced_at,
+       const bundles=await database.query(`SELECT b.id,b.parent_variant_id,b.title,b.sku,b.mode,b.location_id,b.release_date,b.preorder_limit,b.reconciled_at,jsonb_array_length(b.components) AS card_count,b.synced_at,
            (SELECT a.status FROM allocation_batches a WHERE a.bundle_id=b.id ORDER BY a.id DESC LIMIT 1) AS allocation_status,
            COALESCE(sum(o.purchased),0)::int AS sold,COALESCE(sum(o.outstanding),0)::int AS outstanding,COUNT(o.order_id)::int AS order_count
           FROM bundles b LEFT JOIN preorder_orders o ON o.bundle_id=b.id
@@ -137,6 +137,18 @@ export function makeHandler(database=pool,{getHtml=()=>readFile(htmlPath,'utf8')
         WHERE bundles.mode='PREORDER' RETURNING id`,[shop,parent.parentVariantId,parent.parentProductId,parent.title,parent.sku,parent.releaseDate,JSON.stringify(parent.components)]);
        if(!saved.rowCount)return send(res,409,{error:'Bundle is locked beyond PREORDER; its component list cannot be changed.'});
        return send(res,200,{saved:true,id:saved.rows[0].id,cards:parent.components.length,status:'PREORDER'});
+     }
+     if(req.method==='POST'&&url.pathname==='/api/admin/bundle-settings'){
+       const body=JSON.parse((await rawBody(req,4096)).toString());
+       const id=Number(body.bundleId),locationId=String(body.locationId||'');
+       if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid bundle ID'});
+       if(!/^gid:\/\/shopify\/Location\/\d+$/.test(locationId))return send(res,400,{error:'Select a valid Shopify location'});
+       const token=await authShopToken(database,shop);
+       const locations=await bundleLocations(shop,token);
+       if(!locations.some(location=>location.id===locationId))return send(res,400,{error:'That Shopify location is unavailable'});
+       const updated=await database.query(`UPDATE bundles SET location_id=$3,synced_at=now() WHERE id=$1 AND shop=$2 AND mode='PREORDER' RETURNING id`,[id,shop,locationId]);
+       if(!updated.rowCount)return send(res,409,{error:'Only pre-order bundles can change inventory location'});
+       return send(res,200,{saved:true,bundleId:id,locationId});
      }
      if(req.method==='POST'&&url.pathname==='/api/admin/reconcile'){
        const body=JSON.parse((await rawBody(req,2048)).toString());
