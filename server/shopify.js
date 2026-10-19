@@ -1,6 +1,6 @@
 import {assertShop,decrypt} from './security.js';
 import {decodeShopifyPlan} from './plan.js';
-import {encodeLiveComponents,makePlanShards,normaliseComponents} from '../extensions/preorder-manager/src/logic.js';
+import {decodeLiveComponents,encodeLiveComponents,normaliseComponents} from '../extensions/preorder-manager/src/logic.js';
 const getApiVersion=()=>process.env.SHOPIFY_API_VERSION||'2026-10';
 export async function exchangeOfflineToken(shop,idToken,{clientId=process.env.SHOPIFY_API_KEY,secret=process.env.SHOPIFY_API_SECRET,fetchImpl=fetch}={}){
   shop=assertShop(shop);
@@ -31,6 +31,7 @@ export async function authShopToken(pool,shop){
 }
 export const PARENT=`query BundleParent($id:ID!){ productVariant(id:$id){id sku displayName product{id title status}
   metafield(namespace:"tt_preorders",key:"configuration"){value}
+  liveField:metafield(namespace:"tt_preorders",key:"live_components"){value}
 }}`;
 export const SHARDS=`query PlanShards($id:ID!,$keys:[String!]!,$after:String){productVariant(id:$id){metafields(first:100,keys:$keys,after:$after){nodes{key value}pageInfo{hasNextPage endCursor}}}}`;
 export async function fetchBundlePlan(shop,token,parentId,request=graphql){
@@ -39,18 +40,24 @@ export async function fetchBundlePlan(shop,token,parentId,request=graphql){
   if(!p)throw Error('Shopify parent variant not found');
   if(!p.sku?.trim())throw Error('Give the bundle parent a unique SKU before syncing');
   const config=p.metafield?.value?JSON.parse(p.metafield.value):{};
-  if(!config.schemaVersion)throw Error('Save the component plan in the v5 editor first');
-  if(config.schemaVersion===3 && (config.shardCount<1||config.shardCount>1000))throw Error('Invalid plan shard count');
-  const shards=[];
-  if(config.schemaVersion===3){
-    const keys=Array.from({length:config.shardCount},(_,i)=>`tt_preorders.plan_${config.bank}_${String(i).padStart(6,'0')}`);
-    for(let i=0;i<keys.length;i+=100){let after=null;do{
-      const r=(await request(shop,token,SHARDS,{id:parentId,keys:keys.slice(i,i+100),after}))?.productVariant?.metafields;
-      if(!r)throw Error('Missing bundle plan shards');
-      shards.push(...r.nodes);after=r.pageInfo.hasNextPage?r.pageInfo.endCursor:null;
-    }while(after);}
+  let components;
+  try{
+    if(!config.schemaVersion)throw Error('Save the component plan first');
+    if(config.schemaVersion===3 && (config.shardCount<1||config.shardCount>1000))throw Error('Invalid plan shard count');
+    const shards=[];
+    if(config.schemaVersion===3){
+      const keys=Array.from({length:config.shardCount},(_,i)=>`tt_preorders.plan_${config.bank}_${String(i).padStart(6,'0')}`);
+      for(let i=0;i<keys.length;i+=100){let after=null;do{
+        const r=(await request(shop,token,SHARDS,{id:parentId,keys:keys.slice(i,i+100),after}))?.productVariant?.metafields;
+        if(!r)throw Error('Missing bundle plan pages');
+        shards.push(...r.nodes);after=r.pageInfo.hasNextPage?r.pageInfo.endCursor:null;
+      }while(after);}
+    }
+    components=decodeShopifyPlan(config,shards);
+  }catch(error){
+    if(!p.liveField?.value)throw error;
+    components=decodeLiveComponents(p.liveField.value);
   }
-  const components=decodeShopifyPlan(config,shards);
   if(!components.length)throw Error('No linked singles found');
   if(components.some(c=>c.id===parentId))throw Error('A bundle cannot contain its own variant');
   return {parentVariantId:parentId,parentProductId:p.product.id,sku:p.sku.trim(),title:p.product.title,releaseDate:config.releaseDate||null,components};
@@ -111,14 +118,10 @@ export async function saveLiveBundle(shop,token,body,request=graphql){
   const problems=[];
   for(const c of components){const v=byId.get(c.id);if(!v)problems.push(`${c.title}: variant not found`);else if(v.requiresComponents)problems.push(`${v.displayName}: nested bundles are not supported`);}
   if(problems.length)throw Error(problems.slice(0,5).join('; '));
-  const {index,fields}=makePlanShards(components,'a',releaseDate);
-  for(let i=0;i<fields.length;i+=20){
-    const saved=await request(shop,token,SET_METAFIELDS,{metafields:fields.slice(i,i+20).map(f=>({...f,ownerId:parentId,namespace:'tt_preorders'}))});
-    checked(saved?.metafieldsSet,'Save bundle plan');
-  }
   const liveValue=encodeLiveComponents(components);
+  const config={schemaVersion:2,releaseDate,components};
   const saved=await request(shop,token,SET_METAFIELDS,{metafields:[
-    {ownerId:parentId,namespace:'tt_preorders',key:'configuration',type:'json',value:JSON.stringify(index)},
+    {ownerId:parentId,namespace:'tt_preorders',key:'configuration',type:'json',value:JSON.stringify(config)},
     {ownerId:parentId,namespace:'tt_preorders',key:'live_components',type:'json',value:liveValue},
     {ownerId:parentId,namespace:'tt_preorders',key:'live_enabled',type:'boolean',value:'true'},
   ]});
@@ -126,3 +129,4 @@ export async function saveLiveBundle(shop,token,body,request=graphql){
   await ensureCartTransform(shop,token,request);
   return {parentVariantId:parentId,components,releaseDate};
 }
+
