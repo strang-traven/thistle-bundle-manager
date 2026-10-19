@@ -43,6 +43,12 @@ test('Shopify transform expands precisely 150 items at quantity 2',()=> {
 test('unconfigured parent does not transform',()=> {
   assert.deepEqual(cartTransformRun({cart:{lines:[{id:'1',merchandise:{__typename:'ProductVariant',id:id(30)}}]}}),{operations:[]});
 });
+test('large bundle parts expand only when the complete protected group is present',()=> {
+  const line=(part,components)=>({id:`line-${part}`,quantity:2,group:{value:'instance-1'},part:{value:String(part)},total:{value:'2'},merchandise:{__typename:'ProductVariant',id:id(50+part),liveEnabled:{value:'true'},liveConfig:{jsonValue:{v:2,c:components}},livePart:{jsonValue:{v:1,g:'bundle-9',p:part,t:2}}}});
+  const result=cartTransformRun({cart:{lines:[line(1,[[2,1]]),line(2,[[3,1]])]}});
+  assert.equal(result.operations.length,2);
+  assert.throws(()=>cartTransformRun({cart:{lines:[line(1,[[2,1]])]}}),/All parts/);
+});
 test('prevent untracked, overselling and nested components before checkout activation',()=> {
   assert.equal(componentProblems([{id:id(1),quantity:1,title:'Card',inventoryPolicy:'CONTINUE',tracked:false,requiresComponents:true}],id(77)).length,3);
 });

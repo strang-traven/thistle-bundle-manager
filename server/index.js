@@ -2,7 +2,7 @@ import http from 'node:http';
 import {readFile} from 'node:fs/promises';
 import pg from 'pg';
 import {verifyWebhook,verifyIdToken,assertShop,encrypt} from './security.js';
-import {authShopToken,createBundleProduct,exchangeOfflineToken,fetchBundlePlan,saveLiveBundle} from './shopify.js';
+import {authShopToken,bundleLocations,createBundleProduct,exchangeOfflineToken,fetchBundlePlan,stageBundlePlan} from './shopify.js';
 import {enqueue,runWorker} from './worker.js';
 import {fixedBundleParts} from './plan.js';
 const port=Number(process.env.PORT||8080);
@@ -80,13 +80,14 @@ export function makeHandler(database=pool,{getHtml=()=>readFile(htmlPath,'utf8')
    if(url.pathname.startsWith('/api/admin/')){
      const {shop}=await auth(req);
      if(req.method==='GET'&&url.pathname==='/api/admin/status'){
-       const bundles=await database.query(`SELECT b.id,b.parent_variant_id,b.title,b.sku,b.mode,jsonb_array_length(b.components) AS card_count,b.synced_at,
-           COALESCE(sum(o.outstanding),0)::int AS outstanding,COUNT(o.order_id)::int AS order_count
+       const bundles=await database.query(`SELECT b.id,b.parent_variant_id,b.title,b.sku,b.mode,b.reconciled_at,jsonb_array_length(b.components) AS card_count,b.synced_at,
+           (SELECT a.status FROM allocation_batches a WHERE a.bundle_id=b.id ORDER BY a.id DESC LIMIT 1) AS allocation_status,
+           COALESCE(sum(o.purchased),0)::int AS sold,COALESCE(sum(o.outstanding),0)::int AS outstanding,COUNT(o.order_id)::int AS order_count
           FROM bundles b LEFT JOIN preorder_orders o ON o.bundle_id=b.id
           WHERE b.shop=$1 GROUP BY b.id ORDER BY b.id DESC LIMIT 100`,[shop]);
        const jobs=await database.query(`SELECT id,kind,status,attempts,last_error,updated_at FROM jobs WHERE shop=$1 ORDER BY id DESC LIMIT 30`,[shop]);
        const connected=await database.query('SELECT access_token_cipher IS NOT NULL AS linked FROM shops WHERE shop=$1',[shop]);
-       return send(res,200,{shop,linked:!!connected.rows[0]?.linked,bundles:bundles.rows,jobs:jobs.rows,stockMutationsEnabled:false});
+       return send(res,200,{shop,linked:!!connected.rows[0]?.linked,bundles:bundles.rows,jobs:jobs.rows,stockMutationsEnabled:true});
      }
      if(req.method==='POST'&&url.pathname==='/api/admin/connect'){
        const jwt=(req.headers.authorization||'').replace(/^Bearer /i,'');
@@ -115,13 +116,19 @@ export function makeHandler(database=pool,{getHtml=()=>readFile(htmlPath,'utf8')
      if(req.method==='POST'&&url.pathname==='/api/admin/bundle-product'){
        const body=JSON.parse((await rawBody(req,32768)).toString());
        const token=await authShopToken(database,shop);
-       return send(res,200,await createBundleProduct(shop,token,body));
+       const created=await createBundleProduct(shop,token,body);
+       const saved=await database.query(`INSERT INTO bundles(shop,parent_variant_id,parent_product_id,title,sku,release_date,preorder_limit,location_id)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,[shop,created.parentVariantId,created.productId,created.title,created.sku,created.releaseDate,created.preorderLimit,created.locationId]);
+       return send(res,200,{...created,id:saved.rows[0].id});
+     }
+     if(req.method==='GET'&&url.pathname==='/api/admin/locations'){
+       const token=await authShopToken(database,shop);
+       return send(res,200,{locations:await bundleLocations(shop,token)});
      }
      if(req.method==='POST'&&url.pathname==='/api/admin/bundle-save'){
        const body=JSON.parse((await rawBody(req,512*1024)).toString());
        const token=await authShopToken(database,shop);
-       const bundle=await saveLiveBundle(shop,token,body);
-       const parent=await fetchBundlePlan(shop,token,bundle.parentVariantId);
+       const parent=await stageBundlePlan(shop,token,body);
        const duplicate=await database.query('SELECT parent_variant_id FROM bundles WHERE shop=$1 AND sku=$2 AND parent_variant_id<>$3',[shop,parent.sku,parent.parentVariantId]);
        if(duplicate.rowCount)return send(res,409,{error:'The parent SKU is already assigned to another bundle. Use a unique SKU.'});
        const saved=await database.query(`INSERT INTO bundles(shop,parent_variant_id,parent_product_id,title,sku,release_date,components)
@@ -129,7 +136,7 @@ export function makeHandler(database=pool,{getHtml=()=>readFile(htmlPath,'utf8')
         title=EXCLUDED.title,sku=EXCLUDED.sku,release_date=EXCLUDED.release_date,components=EXCLUDED.components,synced_at=now()
         WHERE bundles.mode='PREORDER' RETURNING id`,[shop,parent.parentVariantId,parent.parentProductId,parent.title,parent.sku,parent.releaseDate,JSON.stringify(parent.components)]);
        if(!saved.rowCount)return send(res,409,{error:'Bundle is locked beyond PREORDER; its component list cannot be changed.'});
-       return send(res,200,{saved:true,id:saved.rows[0].id,cards:parent.components.length,status:'DRAFT'});
+       return send(res,200,{saved:true,id:saved.rows[0].id,cards:parent.components.length,status:'PREORDER'});
      }
      if(req.method==='POST'&&url.pathname==='/api/admin/reconcile'){
        const body=JSON.parse((await rawBody(req,2048)).toString());
@@ -140,6 +147,34 @@ export function makeHandler(database=pool,{getHtml=()=>readFile(htmlPath,'utf8')
        await enqueue(database,shop,'ORDER_RECONCILE',{bundleId:id});
        return send(res,202,{queued:true,bundleId:id});
      }
+     if(req.method==='POST'&&url.pathname==='/api/admin/allocate'){
+       const body=JSON.parse((await rawBody(req,2048)).toString());
+       const id=Number(body.bundleId);
+       if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid bundle ID'});
+       const client=await database.connect();
+       try{
+         await client.query('BEGIN');
+         await client.query('SELECT pg_advisory_xact_lock($1)',[id]);
+         const found=await client.query(`SELECT * FROM bundles WHERE id=$1 AND shop=$2 FOR UPDATE`,[id,shop]);
+         const bundle=found.rows[0];
+         if(!bundle)throw Object.assign(Error('Bundle not found'),{status:404});
+         if(bundle.mode!=='PREORDER')throw Object.assign(Error(`Bundle is already ${bundle.mode}`),{status:409});
+         if(!bundle.reconciled_at)throw Object.assign(Error('Reconcile orders before allocating cards'),{status:409});
+         if(!bundle.location_id)throw Object.assign(Error('Select one inventory location before allocation'),{status:409});
+         if(!Array.isArray(bundle.components)||!bundle.components.length)throw Object.assign(Error('Link and save all card variants before allocation'),{status:409});
+         const orders=await client.query(`SELECT order_id,order_name,outstanding FROM preorder_orders
+           WHERE bundle_id=$1 AND shop=$2 AND outstanding>0 AND cancelled=false ORDER BY order_id`,[id,shop]);
+         const outstanding=orders.rows.reduce((sum,row)=>sum+Number(row.outstanding),0);
+         if(!outstanding)throw Object.assign(Error('No outstanding pre-orders to allocate'),{status:409});
+         const made=await client.query(`INSERT INTO allocation_batches(bundle_id,shop,location_id,outstanding_sets,component_count,plan_snapshot)
+           VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,[id,shop,bundle.location_id,outstanding,bundle.components.length,JSON.stringify({components:bundle.components,orders:[]})]);
+         const batchId=made.rows[0].id;
+         await client.query(`UPDATE bundles SET mode='ALLOCATING' WHERE id=$1`,[id]);
+         await enqueue(client,shop,'BUNDLE_ALLOCATE',{batchId},`${shop}:allocation:${batchId}`);
+         await client.query('COMMIT');
+         return send(res,202,{queued:true,bundleId:id,batchId,outstandingSets:outstanding,componentCount:bundle.components.length});
+       }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
+     }
      if(req.method==='GET'&&url.pathname==='/api/admin/part-plan'){
        const id=Number(url.searchParams.get('bundleId'));
        if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid bundle ID'});
@@ -147,6 +182,14 @@ export function makeHandler(database=pool,{getHtml=()=>readFile(htmlPath,'utf8')
        if(!found.rowCount)return send(res,404,{error:'Bundle not found'});
        const parts=fixedBundleParts(found.rows[0].components);
        return send(res,200,{mode:found.rows[0].mode,totalCards:parts.reduce((s,p)=>s+p.items.length,0),parts:parts.map(p=>({part:p.part,count:p.items.length,components:p.items}))});
+     }
+     if(req.method==='GET'&&url.pathname==='/api/admin/manifests'){
+       const id=Number(url.searchParams.get('bundleId'));
+       if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid bundle ID'});
+       const found=await database.query('SELECT id FROM bundles WHERE shop=$1 AND id=$2',[shop,id]);
+       if(!found.rowCount)return send(res,404,{error:'Bundle not found'});
+       const manifests=await database.query(`SELECT order_id,order_name,bundle_quantity,items,status,updated_at FROM packing_manifests WHERE bundle_id=$1 ORDER BY order_name,order_id`,[id]);
+       return send(res,200,{manifests:manifests.rows});
      }
      return send(res,404,{error:'Admin route not found'});
    }

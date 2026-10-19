@@ -66,12 +66,27 @@ export const ORDER_BY_ID=`query OrderForBundle($id:ID!){order(id:$id){id name ca
 export const ORDER_SCAN=`query OrderScan($after:String,$q:String!){orders(first:40,after:$after,query:$q,sortKey:CREATED_AT,reverse:true){nodes{id name cancelledAt displayFinancialStatus lineItems(first:100){nodes{currentQuantity unfulfilledQuantity variant{id}}pageInfo{hasNextPage}}}pageInfo{hasNextPage endCursor}}}`;
 export function skuQuery(sku){if(!sku||!/^[-a-zA-Z0-9_.:\/ ]{1,100}$/.test(sku))throw Error('Unsafe SKU; use a simple unique SKU for the parent');return `sku:"${sku}" status:any`;}
 
-const CREATE_PRODUCT=`mutation CreateBundleProduct($product:ProductCreateInput!){productCreate(product:$product){product{id title variants(first:1){nodes{id}}}userErrors{field message}}}`;
+const CREATE_PRODUCT=`mutation CreateBundleProduct($product:ProductCreateInput!){productCreate(product:$product){product{id title handle variants(first:1){nodes{id}}}userErrors{field message}}}`;
 const UPDATE_VARIANT=`mutation UpdateBundleVariant($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){productVariants{id sku price}userErrors{field message}}}`;
+const LOCATIONS=`query BundleLocations{locations(first:50){nodes{id name}}}`;
+const VARIANT_INVENTORY=`query BundleVariantInventory($id:ID!){productVariant(id:$id){id inventoryItem{id}}}`;
+const ACTIVATE_INVENTORY=`mutation ActivateBundleInventory($inventoryItemId:ID!,$locationId:ID!){inventoryActivate(inventoryItemId:$inventoryItemId,locationId:$locationId){inventoryLevel{id}userErrors{field message}}}`;
+export const SET_INVENTORY=`mutation SetBundleInventory($input:InventorySetQuantitiesInput!){inventorySetQuantities(input:$input){inventoryAdjustmentGroup{createdAt}userErrors{field message code}}}`;
+const PARENT_SETUP=`query BundleParentSetup($id:ID!){productVariant(id:$id){id product{id}}}`;
+const STAGED_PARENT=`query StagedBundleParent($id:ID!){productVariant(id:$id){id sku product{id title status}}}`;
 const COMPONENTS=`query BundleComponents($ids:[ID!]!){nodes(ids:$ids){... on ProductVariant{id displayName requiresComponents inventoryPolicy inventoryItem{tracked}}}}`;
 const SET_METAFIELDS=`mutation SaveBundleFields($metafields:[MetafieldsSetInput!]!){metafieldsSet(metafields:$metafields){metafields{key value}userErrors{field message code}}}`;
 const CART_TRANSFORMS=`query ActiveCartTransforms{cartTransforms(first:10){nodes{id}}}`;
 const CREATE_CART_TRANSFORM=`mutation ActivateBundleTransform($functionHandle:String!,$blockOnFailure:Boolean!){cartTransformCreate(functionHandle:$functionHandle,blockOnFailure:$blockOnFailure){cartTransform{id}userErrors{field message}}}`;
+export const CLOSE_PREORDER=`mutation CloseBundlePreorder($product:ProductUpdateInput!){productUpdate(product:$product){product{id status}userErrors{field message}}}`;
+export const ALLOCATION_COMPONENT=`query AllocationComponent($id:ID!,$locationId:ID!){productVariant(id:$id){id displayName inventoryPolicy requiresComponents inventoryItem{id tracked inventoryLevel(locationId:$locationId){quantities(names:["available","reserved"]){name quantity}}}}}`;
+export const RESERVE_COMPONENT=`mutation ReserveBundleComponent($input:InventoryMoveQuantitiesInput!,$key:String!){inventoryMoveQuantities(input:$input) @idempotent(key:$key){inventoryAdjustmentGroup{createdAt}userErrors{field message code}}}`;
+export const ADJUST_COMPONENT=`mutation AdjustBundleComponent($input:InventoryAdjustQuantitiesInput!,$key:String!){inventoryAdjustQuantities(input:$input) @idempotent(key:$key){inventoryAdjustmentGroup{createdAt}userErrors{field message code}}}`;
+export const PARENT_CAPACITY=`query LiveParentCapacity($id:ID!,$locationId:ID!){productVariant(id:$id){id product{id} inventoryItem{id tracked inventoryLevel(locationId:$locationId){quantities(names:["available"]){name quantity}}}}}`;
+const PRODUCT_BY_HANDLE=`query InternalBundlePart($identifier:ProductIdentifierInput!){productByIdentifier(identifier:$identifier){id title handle variants(first:1){nodes{id}}}}`;
+const PRODUCT_PUBLICATIONS=`query BundlePublications($id:ID!){product(id:$id){resourcePublications(first:50){nodes{publication{id}}}}}`;
+const PUBLISH_PRODUCT=`mutation PublishBundlePart($id:ID!,$input:[PublicationInput!]!){publishablePublish(id:$id,input:$input){userErrors{field message}}}`;
+const SALES_PUBLICATIONS=`query SalesPublications{publications(first:50){nodes{id catalog{title}}}}`;
 
 function checked(result,label){
   if(result?.userErrors?.length)throw Error(`${label}: `+result.userErrors.map(e=>e.message).join('; '));
@@ -84,15 +99,37 @@ export function validateBundleInput(body){
   if(!title||title.length>255)throw Error('Enter a bundle product name (maximum 255 characters)');
   if(!/^[-a-zA-Z0-9_.:\/ ]{1,100}$/.test(sku))throw Error('Enter a simple unique bundle SKU');
   if(!/^\d+(\.\d{1,2})?$/.test(price)||Number(price)<=0)throw Error('Enter a valid bundle price greater than zero');
-  return {title,sku,price:Number(price).toFixed(2)};
+  const preorderLimit=Number(body?.preorderLimit);
+  const releaseDate=String(body?.releaseDate||'').trim();
+  const locationId=String(body?.locationId||'').trim();
+  if(!Number.isSafeInteger(preorderLimit)||preorderLimit<1||preorderLimit>100000)throw Error('Enter a pre-order limit between 1 and 100,000');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(releaseDate))throw Error('Enter the expected release date');
+  if(locationId&&!/^gid:\/\/shopify\/Location\/\d+$/.test(locationId))throw Error('Select a valid Shopify location');
+  return {title,sku,price:Number(price).toFixed(2),preorderLimit,releaseDate,locationId};
+}
+export async function bundleLocations(shop,token,request=graphql){
+  const locations=(await request(shop,token,LOCATIONS))?.locations?.nodes||[];
+  if(!locations.length)throw Error('Shopify has no active inventory locations');
+  return locations;
 }
 export async function createBundleProduct(shop,token,body,request=graphql){
   const input=validateBundleInput(body);
-  const created=checked((await request(shop,token,CREATE_PRODUCT,{product:{title:input.title,status:'DRAFT',productType:'Bundle',tags:['Thistle Bundle']}}))?.productCreate,'Create product');
+  const locations=await bundleLocations(shop,token,request);
+  const locationId=input.locationId||locations[0].id;
+  if(!locations.some(location=>location.id===locationId))throw Error('The selected Shopify location is unavailable');
+  const created=checked((await request(shop,token,CREATE_PRODUCT,{product:{title:input.title,status:'ACTIVE',productType:'Bundle',tags:['Thistle Bundle','Thistle Pre-Order']}}))?.productCreate,'Create product');
   const productId=created?.product?.id, variantId=created?.product?.variants?.nodes?.[0]?.id;
   if(!productId||!variantId)throw Error('Shopify created the product but did not return its default variant');
   checked((await request(shop,token,UPDATE_VARIANT,{productId,variants:[{id:variantId,price:input.price,inventoryPolicy:'DENY',inventoryItem:{sku:input.sku,tracked:true}}]}))?.productVariantsBulkUpdate,'Update bundle variant');
-  return {productId,parentVariantId:variantId,title:input.title,sku:input.sku,price:input.price,status:'DRAFT'};
+  const inventoryItemId=(await request(shop,token,VARIANT_INVENTORY,{id:variantId}))?.productVariant?.inventoryItem?.id;
+  if(!inventoryItemId)throw Error('Shopify did not return the bundle inventory item');
+  checked((await request(shop,token,ACTIVATE_INVENTORY,{inventoryItemId,locationId}))?.inventoryActivate,'Activate bundle inventory');
+  checked((await request(shop,token,SET_INVENTORY,{input:{name:'available',reason:'correction',referenceDocumentUri:`gid://thistle/Preorder/${variantId.split('/').pop()}`,ignoreCompareQuantity:true,quantities:[{inventoryItemId,locationId,quantity:input.preorderLimit}]}}))?.inventorySetQuantities,'Set pre-order inventory');
+  const publications=(await request(shop,token,SALES_PUBLICATIONS))?.publications?.nodes||[];
+  const online=publications.find(x=>/online store/i.test(x.catalog?.title||''))||publications[0];
+  if(!online)throw Error('Shopify has no sales publication available for the pre-order product');
+  checked((await request(shop,token,PUBLISH_PRODUCT,{id:productId,input:[{publicationId:online.id}]}))?.publishablePublish,'Publish pre-order product');
+  return {productId,parentVariantId:variantId,inventoryItemId,locationId,title:input.title,sku:input.sku,price:input.price,preorderLimit:input.preorderLimit,releaseDate:input.releaseDate,status:'ACTIVE'};
 }
 export async function ensureCartTransform(shop,token,request=graphql){
   const existing=(await request(shop,token,CART_TRANSFORMS))?.cartTransforms?.nodes||[];
@@ -109,6 +146,8 @@ export async function saveLiveBundle(shop,token,body,request=graphql){
   const components=normaliseComponents(body?.components);
   encodeLiveComponents(components);
   if(components.some(c=>c.id===parentId))throw Error('A bundle cannot contain its own parent variant');
+  const parent=(await request(shop,token,PARENT_SETUP,{id:parentId}))?.productVariant;
+  if(!parent?.product?.id)throw Error('Bundle parent variant not found');
   const details=[];
   for(let i=0;i<components.length;i+=50){
     const result=(await request(shop,token,COMPONENTS,{ids:components.slice(i,i+50).map(c=>c.id)}))?.nodes||[];
@@ -116,8 +155,15 @@ export async function saveLiveBundle(shop,token,body,request=graphql){
   }
   const byId=new Map(details.filter(Boolean).map(v=>[v.id,v]));
   const problems=[];
-  for(const c of components){const v=byId.get(c.id);if(!v)problems.push(`${c.title}: variant not found`);else if(v.requiresComponents)problems.push(`${v.displayName}: nested bundles are not supported`);}
+  for(const c of components){
+    const v=byId.get(c.id);
+    if(!v)problems.push(`${c.title}: variant not found`);
+    else if(v.requiresComponents)problems.push(`${v.displayName}: nested bundles are not supported`);
+    else if(!v.inventoryItem?.tracked)problems.push(`${v.displayName}: turn on Track quantity in Shopify`);
+    else if(v.inventoryPolicy!=='DENY')problems.push(`${v.displayName}: turn off Continue selling when out of stock`);
+  }
   if(problems.length)throw Error(problems.slice(0,5).join('; '));
+  checked((await request(shop,token,UPDATE_VARIANT,{productId:parent.product.id,variants:[{id:parentId,inventoryPolicy:'DENY',inventoryItem:{tracked:true}}]}))?.productVariantsBulkUpdate,'Configure bundle parent inventory');
   const liveValue=encodeLiveComponents(components);
   const config={schemaVersion:2,releaseDate,components};
   const saved=await request(shop,token,SET_METAFIELDS,{metafields:[
@@ -130,3 +176,58 @@ export async function saveLiveBundle(shop,token,body,request=graphql){
   return {parentVariantId:parentId,components,releaseDate};
 }
 
+export async function configureLargeLiveBundle(shop,token,{bundleId,title,parentProductId,parentVariantId,parts},request=graphql){
+  if(!Number.isSafeInteger(Number(bundleId))||!Array.isArray(parts)||parts.length<2||parts.length>100)throw Error('Invalid large bundle part plan');
+  const publications=(await request(shop,token,PRODUCT_PUBLICATIONS,{id:parentProductId}))?.product?.resourcePublications?.nodes?.map(x=>({publicationId:x.publication.id}))||[];
+  const variants=[];
+  for(let index=0;index<parts.length;index++){
+    let productId=parentProductId,variantId=parentVariantId;
+    if(index>0){
+      const handle=`thistle-internal-${bundleId}-part-${index+1}`;
+      let product=(await request(shop,token,PRODUCT_BY_HANDLE,{identifier:{handle}}))?.productByIdentifier;
+      if(!product){
+        product=checked((await request(shop,token,CREATE_PRODUCT,{product:{title:`${title} — internal part ${index+1} of ${parts.length}`,handle,status:'ACTIVE',productType:'Internal bundle part',tags:['Thistle Bundle Part']}}))?.productCreate,'Create internal bundle part')?.product;
+      }
+      productId=product?.id;variantId=product?.variants?.nodes?.[0]?.id;
+      if(!productId||!variantId)throw Error(`Shopify did not return internal bundle part ${index+1}`);
+      checked((await request(shop,token,UPDATE_VARIANT,{productId,variants:[{id:variantId,price:'0.00',inventoryPolicy:'CONTINUE',inventoryItem:{sku:`TT-PART-${bundleId}-${index+1}`,tracked:false}}]}))?.productVariantsBulkUpdate,'Configure internal bundle part');
+      if(publications.length)checked((await request(shop,token,PUBLISH_PRODUCT,{id:productId,input:publications}))?.publishablePublish,'Publish internal bundle part');
+      checked((await request(shop,token,SET_METAFIELDS,{metafields:[{ownerId:productId,namespace:'seo',key:'hidden',type:'number_integer',value:'1'}]}))?.metafieldsSet,'Hide internal bundle part from search');
+    }
+    const liveValue=encodeLiveComponents(parts[index].components);
+    checked((await request(shop,token,SET_METAFIELDS,{metafields:[
+      {ownerId:variantId,namespace:'tt_preorders',key:'live_components',type:'json',value:liveValue},
+      {ownerId:variantId,namespace:'tt_preorders',key:'live_enabled',type:'boolean',value:'true'},
+      {ownerId:variantId,namespace:'tt_preorders',key:'live_part',type:'json',value:JSON.stringify({v:1,g:`bundle-${bundleId}`,p:index+1,t:parts.length})}
+    ]}))?.metafieldsSet,'Configure live bundle part');
+    variants.push({part:index+1,productId,variantId,components:parts[index].components});
+  }
+  const numericIds=variants.map(x=>Number(x.variantId.split('/').pop()));
+  if(numericIds.some(x=>!Number.isSafeInteger(x)))throw Error('Shopify returned an invalid bundle part variant ID');
+  checked((await request(shop,token,SET_METAFIELDS,{metafields:[{ownerId:parentVariantId,namespace:'tt_preorders',key:'large_bundle_parts',type:'json',value:JSON.stringify(numericIds)}]}))?.metafieldsSet,'Publish large bundle storefront plan');
+  await ensureCartTransform(shop,token,request);
+  return variants;
+}
+
+export async function stageBundlePlan(shop,token,body,request=graphql){
+  const parentId=String(body?.parentVariantId||'');
+  if(!/^gid:\/\/shopify\/ProductVariant\/\d+$/.test(parentId))throw Error('Select a valid parent product variant');
+  const releaseDate=String(body?.releaseDate||'').trim();
+  if(releaseDate&&!/^\d{4}-\d{2}-\d{2}$/.test(releaseDate))throw Error('Release date must use YYYY-MM-DD');
+  const components=normaliseComponents(body?.components);
+  if(!components.length)throw Error('Link at least one component variant');
+  if(components.some(c=>c.id===parentId))throw Error('A bundle cannot contain its own parent variant');
+  const parent=(await request(shop,token,STAGED_PARENT,{id:parentId}))?.productVariant;
+  if(!parent?.product?.id)throw Error('Bundle parent variant not found');
+  if(!parent.sku?.trim())throw Error('Give the bundle parent a unique SKU before saving');
+  const found=[];
+  for(let i=0;i<components.length;i+=50){
+    const result=(await request(shop,token,COMPONENTS,{ids:components.slice(i,i+50).map(c=>c.id)}))?.nodes||[];
+    found.push(...result);
+  }
+  const byId=new Map(found.filter(Boolean).map(v=>[v.id,v]));
+  const problems=[];
+  for(const c of components){const v=byId.get(c.id);if(!v)problems.push(`${c.title}: variant not found`);else if(v.requiresComponents)problems.push(`${v.displayName}: nested bundles are not supported`);}
+  if(problems.length)throw Error(problems.slice(0,5).join('; '));
+  return {parentVariantId:parentId,parentProductId:parent.product.id,title:parent.product.title,sku:parent.sku.trim(),releaseDate:releaseDate||null,components};
+}

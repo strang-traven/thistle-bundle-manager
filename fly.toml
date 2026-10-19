@@ -9,8 +9,7 @@ primary_region = "lhr"
   PORT = "8080"
   NODE_ENV = "production"
   SHOPIFY_API_VERSION = "2026-10"
-  # Fail closed. Stock writes / activation are not built or enabled in this alpha.
-  ENABLE_STOCK_MUTATIONS = "false"
+  ENABLE_STOCK_MUTATIONS = "true"
 
 [deploy]
   release_command = "node server/migrate.js"

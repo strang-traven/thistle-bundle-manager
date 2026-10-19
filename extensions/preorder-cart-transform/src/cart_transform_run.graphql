@@ -2,6 +2,10 @@ query Input {
   cart {
     lines {
       id
+      quantity
+      group: attribute(key: "_tt_bundle_group") { value }
+      part: attribute(key: "_tt_bundle_part") { value }
+      total: attribute(key: "_tt_bundle_total") { value }
       merchandise {
         __typename
         ... on ProductVariant {
@@ -10,6 +14,9 @@ query Input {
             value
           }
           liveConfig: metafield(namespace: "tt_preorders", key: "live_components") {
+            jsonValue
+          }
+          livePart: metafield(namespace: "tt_preorders", key: "live_part") {
             jsonValue
           }
         }

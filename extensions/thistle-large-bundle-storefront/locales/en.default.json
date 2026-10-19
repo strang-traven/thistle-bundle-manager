@@ -1,0 +1,13 @@
+{
+  "ratings": {
+    "stars": {
+      "label": "Ratings"
+    },
+    "home": {
+      "recommendationText": "Recommended Product!"
+    }
+  },
+  "large_bundle": {
+    "add_error": "The complete bundle could not be added. Please refresh and try again."
+  }
+}

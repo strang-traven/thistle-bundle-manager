@@ -3052,4 +3052,4 @@ export enum WeightUnit {
 export type InputVariables = Exact<{ [key: string]: never; }>;
 
 
-export type Input = { __typename?: 'Input', cart: { __typename?: 'Cart', lines: Array<{ __typename?: 'CartLine', id: string, merchandise: { __typename: 'CustomProduct' } | { __typename: 'ProductVariant', id: string, liveEnabled?: { __typename?: 'Metafield', value: string } | null, liveConfig?: { __typename?: 'Metafield', jsonValue: any } | null } }> } };
+export type Input = { __typename?: 'Input', cart: { __typename?: 'Cart', lines: Array<{ __typename?: 'CartLine', id: string, quantity: number, group?: { __typename?: 'Attribute', value?: string | null } | null, part?: { __typename?: 'Attribute', value?: string | null } | null, total?: { __typename?: 'Attribute', value?: string | null } | null, merchandise: { __typename: 'CustomProduct' } | { __typename: 'ProductVariant', id: string, liveEnabled?: { __typename?: 'Metafield', value: string } | null, liveConfig?: { __typename?: 'Metafield', jsonValue: any } | null, livePart?: { __typename?: 'Metafield', jsonValue: any } | null } }> } };

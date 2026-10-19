@@ -14,7 +14,7 @@ topics = ["orders/create", "orders/updated", "orders/cancelled", "orders/paid", 
 uri = "/webhooks/shopify"
 
 [access_scopes]
-scopes = "read_products,write_products,read_inventory,write_inventory,read_orders,read_fulfillments,read_locations,read_markets_home,read_cart_transforms,write_cart_transforms"
+scopes = "read_products,write_products,read_inventory,write_inventory,read_orders,read_fulfillments,read_locations,read_markets_home,read_cart_transforms,write_cart_transforms,read_publications,write_publications"
 
 [auth]
 redirect_urls = ["https://thistle-bundle-manager.fly.dev/auth/callback"]

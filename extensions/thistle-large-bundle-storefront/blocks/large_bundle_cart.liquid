@@ -1,0 +1,55 @@
+{% if request.page_type == 'product' %}
+  {% assign thistle_variant = product.selected_or_first_available_variant %}
+  {% assign thistle_parts = thistle_variant.metafields.tt_preorders.large_bundle_parts.value %}
+  {% if thistle_parts != blank %}
+    <div id="thistle-bundle-status-{{ block.id }}" role="status" aria-live="polite"></div>
+    <script type="application/json" id="thistle-bundle-config-{{ block.id }}">
+      {"masterId":{{ thistle_variant.id | json }},"parts":{{ thistle_parts | json }},"cartAddUrl":{{ routes.cart_add_url | json }},"cartUrl":{{ routes.cart_url | json }},"error":{{ 'large_bundle.add_error' | t | json }}}
+    </script>
+    <script>
+      (() => {
+        const configNode = document.getElementById('thistle-bundle-config-{{ block.id }}');
+        const statusNode = document.getElementById('thistle-bundle-status-{{ block.id }}');
+        if (!configNode || !statusNode) return;
+        const config = JSON.parse(configNode.textContent);
+        if (!Array.isArray(config.parts) || config.parts.length < 2) return;
+        document.documentElement.classList.add('thistle-large-bundle');
+        document.addEventListener('submit', async event => {
+          const form = event.target;
+          if (!(form instanceof HTMLFormElement) || !form.action.includes('/cart/add')) return;
+          const variantInput = form.elements.namedItem('id');
+          if (!variantInput || String(variantInput.value) !== String(config.masterId)) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          const quantityInput = form.elements.namedItem('quantity');
+          const quantity = Math.max(1, Number.parseInt(quantityInput?.value || '1', 10) || 1);
+          const group = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+          const submitters = form.querySelectorAll('[type="submit"]');
+          submitters.forEach(button => button.disabled = true);
+          statusNode.textContent = '';
+          try {
+            const response = await fetch(config.cartAddUrl, {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+              body: JSON.stringify({items: config.parts.map((id, index) => ({id, quantity, properties:{_tt_bundle_group:group,_tt_bundle_part:String(index + 1),_tt_bundle_total:String(config.parts.length)}}))})
+            });
+            if (!response.ok) throw new Error('cart add failed');
+            window.location.assign(config.cartUrl);
+          } catch (error) {
+            statusNode.textContent = config.error;
+            submitters.forEach(button => button.disabled = false);
+          }
+        }, true);
+      })();
+    </script>
+    <style>.thistle-large-bundle .shopify-payment-button{display:none!important}</style>
+  {% endif %}
+{% endif %}
+
+{% schema %}
+{
+  "name": "Thistle large bundles",
+  "target": "body",
+  "settings": []
+}
+{% endschema %}
