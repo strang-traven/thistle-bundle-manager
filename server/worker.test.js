@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {allocateBundle,enqueue,processOne,settleReservation,syncLiveBundle} from './worker.js';
+import {allocateBundle,enqueue,processOne,settleReservation,syncLiveBundle,enqueueLiveRefreshes} from './worker.js';
 import {encrypt} from './security.js';
 test('jobs use unique event keys for idempotent queue writes',async()=>{
  let sql='',params;
@@ -89,4 +89,18 @@ test('live bundle capacity follows the scarcest available component',async()=>{
  };
  try{assert.equal(await syncLiveBundle(db,'myshop.myshopify.com',bundle,api),9);}finally{if(oldKey===undefined)delete process.env.ENCRYPTION_KEY;else process.env.ENCRYPTION_KEY=oldKey;}
  assert.equal(written.quantities[0].quantity,9);assert.equal(written.quantities[0].compareQuantity,10);
+});
+test('live refreshes are coalesced into one shop job per 30-second window',async()=>{
+ const calls=[];
+ const db={query:async(sql,params)=>{
+   calls.push([sql,params]);
+   if(sql.includes("SELECT DISTINCT shop FROM bundles"))return {rows:[{shop:'one.myshopify.com'},{shop:'two.myshopify.com'}]};
+   return {rows:[]};
+ }};
+ await enqueueLiveRefreshes(db,60001);
+ const inserts=calls.filter(([sql])=>sql.includes('INSERT INTO jobs'));
+ assert.equal(inserts.length,2);
+ assert.deepEqual(inserts.map(([,params])=>params[3]),[
+   'one.myshopify.com:live-sync-window:2','two.myshopify.com:live-sync-window:2'
+ ]);
 });

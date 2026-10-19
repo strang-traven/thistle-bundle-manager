@@ -214,9 +214,18 @@ export async function activateLiveBundle(pool,shop,bundleId,api=graphql){
   }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
 }
 export async function enqueueDueTransitions(pool){
-  const due=(await pool.query(`SELECT id,shop FROM bundles WHERE mode='READY_FOR_LIVE'
+  const due=(await pool.query(`SELECT id,shop,ready_for_live_at FROM bundles WHERE mode='READY_FOR_LIVE'
     AND (release_date IS NULL OR release_date='' OR release_date::date<=CURRENT_DATE) ORDER BY id LIMIT 50`)).rows;
-  for(const bundle of due)await enqueue(pool,bundle.shop,'LIVE_ACTIVATE',{bundleId:bundle.id},`${bundle.shop}:live-activate:${bundle.id}`);
+  for(const bundle of due)await enqueue(pool,bundle.shop,'LIVE_ACTIVATE',{bundleId:bundle.id},
+    `${bundle.shop}:live-activate:${bundle.id}:${new Date(bundle.ready_for_live_at).toISOString()}`);
+}
+export async function enqueueLiveRefreshes(pool,now=Date.now()){
+  const shops=(await pool.query(`SELECT DISTINCT shop FROM bundles WHERE mode='LIVE' ORDER BY shop`)).rows;
+  // Inventory webhooks can arrive once per component. One shop-level refresh per
+  // 30-second window prevents a large bundle sale from causing thousands of
+  // duplicate Shopify reads while keeping storefront stock near real time.
+  const window=Math.floor(now/30000);
+  for(const row of shops)await enqueue(pool,row.shop,'LIVE_SYNC',{},`${row.shop}:live-sync-window:${window}`);
 }
 async function executeJob(pool,job){
   switch(job.kind){
@@ -233,7 +242,7 @@ async function executeJob(pool,job){
     case 'INVENTORY_INVALIDATE':
       await pool.query(`INSERT INTO inventory_dirty(shop,inventory_item_id) VALUES($1,$2)
         ON CONFLICT(shop,inventory_item_id) DO UPDATE SET seen_at=now()`,[job.shop,job.payload.inventoryItemId]);
-      return enqueue(pool,job.shop,'LIVE_SYNC',{},`${job.shop}:live-sync:${job.id}`);
+      return enqueue(pool,job.shop,'LIVE_SYNC',{},`${job.shop}:live-sync-window:${Math.floor(Date.now()/30000)}`);
     default:throw new Error('Unknown job type');
   }
 }
@@ -263,7 +272,7 @@ export function runWorker(pool,{signal}={}){
   const interval=setInterval(async()=>{
     if(running||signal?.aborted)return;
     running=true;
-    try{await enqueueDueTransitions(pool);for(let i=0;i<5;i++)if(!await processOne(pool))break;}
+    try{await enqueueDueTransitions(pool);await enqueueLiveRefreshes(pool);for(let i=0;i<5;i++)if(!await processOne(pool))break;}
     catch(e){console.error('Worker loop error',e.message);}finally{running=false;}
   },5000);
   interval.unref();

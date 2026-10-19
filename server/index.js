@@ -197,6 +197,51 @@ export function makeHandler(database=pool,{getHtml=()=>readFile(htmlPath,'utf8')
          return send(res,202,{queued:true,bundleId:id,batchId,outstandingSets:outstanding,componentCount:bundle.components.length});
        }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
      }
+     if(req.method==='POST'&&url.pathname==='/api/admin/prepare-live'){
+       const body=JSON.parse((await rawBody(req,2048)).toString());
+       const id=Number(body.bundleId);
+       if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid bundle ID'});
+       const client=await database.connect();
+       try{
+         await client.query('BEGIN');
+         await client.query('SELECT pg_advisory_xact_lock($1)',[id]);
+         const found=await client.query(`SELECT * FROM bundles WHERE id=$1 AND shop=$2 FOR UPDATE`,[id,shop]);
+         const bundle=found.rows[0];
+         if(!bundle)throw Object.assign(Error('Bundle not found'),{status:404});
+         if(bundle.mode!=='PREORDER')throw Object.assign(Error(`Bundle is already ${bundle.mode}`),{status:409});
+         if(!bundle.reconciled_at)throw Object.assign(Error('Reconcile orders first, then wait for the reconciliation job to finish'),{status:409});
+         if(!bundle.location_id)throw Object.assign(Error('Select an inventory location before preparing live mode'),{status:409});
+         if(!Array.isArray(bundle.components)||!bundle.components.length)throw Object.assign(Error('Link and save all card variants before preparing live mode'),{status:409});
+         const orders=await client.query(`SELECT COALESCE(sum(outstanding),0)::int AS outstanding FROM preorder_orders
+           WHERE bundle_id=$1 AND shop=$2 AND outstanding>0 AND cancelled=false`,[id,shop]);
+         const outstanding=Number(orders.rows[0]?.outstanding||0);
+         if(outstanding)throw Object.assign(Error(`${outstanding} pre-order set(s) still need card allocation. Use Allocate cards to pre-orders first.`),{status:409});
+         await client.query(`UPDATE bundles SET mode='READY_FOR_LIVE',ready_for_live_at=now(),paused_reason=NULL WHERE id=$1`,[id]);
+         if(body.activateNow===true)await enqueue(client,shop,'LIVE_ACTIVATE',{bundleId:id},`${shop}:live-activate:${id}:${Date.now()}`);
+         await client.query('COMMIT');
+         return send(res,202,{queued:body.activateNow===true,bundleId:id,mode:'READY_FOR_LIVE'});
+       }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
+     }
+     if(req.method==='POST'&&url.pathname==='/api/admin/go-live'){
+       const body=JSON.parse((await rawBody(req,2048)).toString());
+       const id=Number(body.bundleId);
+       if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid bundle ID'});
+       const found=await database.query(`SELECT mode FROM bundles WHERE id=$1 AND shop=$2`,[id,shop]);
+       if(!found.rowCount)return send(res,404,{error:'Bundle not found'});
+       if(found.rows[0].mode!=='READY_FOR_LIVE')return send(res,409,{error:'Bundle must finish pre-order allocation before it can go live'});
+       await enqueue(database,shop,'LIVE_ACTIVATE',{bundleId:id},`${shop}:live-activate:${id}:${Date.now()}`);
+       return send(res,202,{queued:true,bundleId:id});
+     }
+     if(req.method==='POST'&&url.pathname==='/api/admin/sync-live'){
+       const body=JSON.parse((await rawBody(req,2048)).toString());
+       const id=Number(body.bundleId);
+       if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid bundle ID'});
+       const found=await database.query(`SELECT mode FROM bundles WHERE id=$1 AND shop=$2`,[id,shop]);
+       if(!found.rowCount)return send(res,404,{error:'Bundle not found'});
+       if(found.rows[0].mode!=='LIVE')return send(res,409,{error:'Only a live bundle can have its stock synchronized'});
+       await enqueue(database,shop,'LIVE_SYNC',{},`${shop}:live-sync:manual:${id}:${Date.now()}`);
+       return send(res,202,{queued:true,bundleId:id});
+     }
      if(req.method==='GET'&&url.pathname==='/api/admin/part-plan'){
        const id=Number(url.searchParams.get('bundleId'));
        if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid bundle ID'});
@@ -231,4 +276,3 @@ if(import.meta.url===`file://${process.argv[1]}`){
  const stop=()=>{stopWorker();app.close(()=>pool.end().then(()=>process.exit(0)));setTimeout(()=>process.exit(1),25000).unref();};
  process.on('SIGINT',stop);process.on('SIGTERM',stop);
 }
-
