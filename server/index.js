@@ -125,6 +125,16 @@ export function makeHandler(database=pool,{getHtml=()=>readFile(htmlPath,'utf8')
        const token=await authShopToken(database,shop);
        return send(res,200,{locations:await bundleLocations(shop,token)});
      }
+     if(req.method==='GET'&&url.pathname==='/api/admin/bundle'){
+       const id=Number(url.searchParams.get('bundleId'));
+       if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid bundle ID'});
+       const found=await database.query(`SELECT id,parent_variant_id,parent_product_id,title,sku,mode,location_id,release_date,
+          preorder_limit,components,reconciled_at,allocated_at,ready_for_live_at,live_at,paused_reason,synced_at
+         FROM bundles WHERE shop=$1 AND id=$2`,[shop,id]);
+       const bundle=found.rows[0];
+       if(!bundle)return send(res,404,{error:'Bundle not found'});
+       return send(res,200,{bundle:{...bundle,editable:bundle.mode==='PREORDER',components:Array.isArray(bundle.components)?bundle.components:[]}});
+     }
      if(req.method==='POST'&&url.pathname==='/api/admin/bundle-save'){
        const body=JSON.parse((await rawBody(req,512*1024)).toString());
        const token=await authShopToken(database,shop);
@@ -221,3 +231,4 @@ if(import.meta.url===`file://${process.argv[1]}`){
  const stop=()=>{stopWorker();app.close(()=>pool.end().then(()=>process.exit(0)));setTimeout(()=>process.exit(1),25000).unref();};
  process.on('SIGINT',stop);process.on('SIGTERM',stop);
 }
+
