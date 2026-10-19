@@ -1,4 +1,5 @@
-import {render} from 'preact';
+import '@shopify/ui-extensions/preact';
+import {Component, render} from 'preact';
 import {useEffect, useState} from 'preact/hooks';
 import {ReservationPanel} from './ReservationPanel.jsx';
 import {InsightsPanel} from './InsightsPanel.jsx';
@@ -111,7 +112,39 @@ const indexedSearch = (term, allProducts = false) => {
   return allProducts ? value : `tag:"${APP_TAG}"${value ? ` AND ${value}` : ''}`;
 };
 
-export default () => render(<App />, document.body);
+class AppErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = {error: null};
+  }
+
+  componentDidCatch(error) {
+    this.setState({error});
+  }
+
+  render() {
+    if (this.state.error) {
+      return <s-page heading="Thistle · Pre-order Bundles">
+        <s-section heading="The app could not start">
+          <s-banner tone="critical">{this.state.error?.message || String(this.state.error)}</s-banner>
+        </s-section>
+      </s-page>;
+    }
+    return this.props.children;
+  }
+}
+
+export default function extension() {
+  try {
+    render(<AppErrorBoundary><App /></AppErrorBoundary>, document.body);
+  } catch (error) {
+    render(<s-page heading="Thistle · Pre-order Bundles">
+      <s-section heading="The app could not start">
+        <s-banner tone="critical">{error?.message || String(error)}</s-banner>
+      </s-section>
+    </s-page>, document.body);
+  }
+}
 
 function App() {
   const [list, setList] = useState([]);

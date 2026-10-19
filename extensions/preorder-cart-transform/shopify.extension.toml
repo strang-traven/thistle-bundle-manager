@@ -15,4 +15,3 @@ export = "cart-transform-run"
 [extensions.build]
 command = ""
 path = "dist/function.wasm"
-typegen_command = "true"

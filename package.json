@@ -14,8 +14,10 @@
     "shopify:deploy": "shopify app deploy --force"
   },
   "dependencies": {
+    "@preact/signals": "2.3.1",
+    "@shopify/ui-extensions": "2026.7.4",
     "pg": "^8.16.3",
-    "preact": "^11.0.1",
+    "preact": "10.27.2",
     "react": "^19.3.1"
   },
   "devDependencies": {
