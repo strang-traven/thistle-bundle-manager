@@ -160,6 +160,34 @@ export function makeHandler(database=pool,{getHtml=()=>readFile(htmlPath,'utf8')
        if(!updated.rowCount)return send(res,409,{error:'Only pre-order bundles can change inventory location'});
        return send(res,200,{saved:true,bundleId:id,locationId});
      }
+     if(req.method==='POST'&&url.pathname==='/api/admin/bundle-remove'){
+       const body=JSON.parse((await rawBody(req,2048)).toString());
+       const id=Number(body.bundleId);
+       if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid bundle ID'});
+       const client=await database.connect();
+       try{
+         await client.query('BEGIN');
+         await client.query('SELECT pg_advisory_xact_lock($1)',[id]);
+         const found=await client.query('SELECT id,title,mode FROM bundles WHERE id=$1 AND shop=$2 FOR UPDATE',[id,shop]);
+         const bundle=found.rows[0];
+         if(!bundle)throw Object.assign(Error('Bundle not found'),{status:404});
+         if(bundle.mode!=='PREORDER')throw Object.assign(Error('Only a pre-order bundle can be removed from the app'),{status:409});
+         const history=await client.query(`SELECT
+           (SELECT COUNT(*)::int FROM preorder_orders WHERE bundle_id=$1 AND shop=$2) AS orders,
+           (SELECT COUNT(*)::int FROM allocation_batches WHERE bundle_id=$1 AND shop=$2) AS allocations`,[id,shop]);
+         if(Number(history.rows[0]?.orders)||Number(history.rows[0]?.allocations)){
+           throw Object.assign(Error('This bundle has order or allocation history and cannot be safely removed'),{status:409});
+         }
+         const running=await client.query(`SELECT 1 FROM jobs WHERE shop=$1 AND kind='ORDER_RECONCILE'
+           AND status='PROCESSING' AND payload->>'bundleId'=$2 LIMIT 1`,[shop,String(id)]);
+         if(running.rowCount)throw Object.assign(Error('Order reconciliation is running. Wait for it to finish before removing this bundle.'),{status:409});
+         await client.query(`DELETE FROM jobs WHERE shop=$1 AND kind='ORDER_RECONCILE'
+           AND status IN ('PENDING','FAILED') AND payload->>'bundleId'=$2`,[shop,String(id)]);
+         await client.query('DELETE FROM bundles WHERE id=$1 AND shop=$2',[id,shop]);
+         await client.query('COMMIT');
+         return send(res,200,{removed:true,bundleId:id,title:bundle.title,shopifyProductDeleted:false});
+       }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
+     }
      if(req.method==='POST'&&url.pathname==='/api/admin/reconcile'){
        const body=JSON.parse((await rawBody(req,2048)).toString());
        const id=Number(body.bundleId);
