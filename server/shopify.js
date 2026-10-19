@@ -1,5 +1,6 @@
 import {assertShop,decrypt} from './security.js';
 import {decodeShopifyPlan} from './plan.js';
+import {encodeLiveComponents,makePlanShards,normaliseComponents} from '../extensions/preorder-manager/src/logic.js';
 const getApiVersion=()=>process.env.SHOPIFY_API_VERSION||'2026-10';
 export async function exchangeOfflineToken(shop,idToken,{clientId=process.env.SHOPIFY_API_KEY,secret=process.env.SHOPIFY_API_SECRET,fetchImpl=fetch}={}){
   shop=assertShop(shop);
@@ -57,3 +58,71 @@ export async function fetchBundlePlan(shop,token,parentId,request=graphql){
 export const ORDER_BY_ID=`query OrderForBundle($id:ID!){order(id:$id){id name cancelledAt displayFinancialStatus lineItems(first:100){nodes{currentQuantity unfulfilledQuantity variant{id}}pageInfo{hasNextPage}}}}`;
 export const ORDER_SCAN=`query OrderScan($after:String,$q:String!){orders(first:40,after:$after,query:$q,sortKey:CREATED_AT,reverse:true){nodes{id name cancelledAt displayFinancialStatus lineItems(first:100){nodes{currentQuantity unfulfilledQuantity variant{id}}pageInfo{hasNextPage}}}pageInfo{hasNextPage endCursor}}}`;
 export function skuQuery(sku){if(!sku||!/^[-a-zA-Z0-9_.:\/ ]{1,100}$/.test(sku))throw Error('Unsafe SKU; use a simple unique SKU for the parent');return `sku:"${sku}" status:any`;}
+
+const CREATE_PRODUCT=`mutation CreateBundleProduct($product:ProductCreateInput!){productCreate(product:$product){product{id title variants(first:1){nodes{id}}}userErrors{field message}}}`;
+const UPDATE_VARIANT=`mutation UpdateBundleVariant($productId:ID!,$variants:[ProductVariantsBulkInput!]!){productVariantsBulkUpdate(productId:$productId,variants:$variants){productVariants{id sku price}userErrors{field message}}}`;
+const COMPONENTS=`query BundleComponents($ids:[ID!]!){nodes(ids:$ids){... on ProductVariant{id displayName requiresComponents inventoryPolicy inventoryItem{tracked}}}}`;
+const SET_METAFIELDS=`mutation SaveBundleFields($metafields:[MetafieldsSetInput!]!){metafieldsSet(metafields:$metafields){metafields{key value}userErrors{field message code}}}`;
+const CART_TRANSFORMS=`query ActiveCartTransforms{cartTransforms(first:10){nodes{id}}}`;
+const CREATE_CART_TRANSFORM=`mutation ActivateBundleTransform($functionHandle:String!,$blockOnFailure:Boolean!){cartTransformCreate(functionHandle:$functionHandle,blockOnFailure:$blockOnFailure){cartTransform{id}userErrors{field message}}}`;
+
+function checked(result,label){
+  if(result?.userErrors?.length)throw Error(`${label}: `+result.userErrors.map(e=>e.message).join('; '));
+  return result;
+}
+export function validateBundleInput(body){
+  const title=String(body?.title||'').trim();
+  const sku=String(body?.sku||'').trim();
+  const price=String(body?.price||'').trim();
+  if(!title||title.length>255)throw Error('Enter a bundle product name (maximum 255 characters)');
+  if(!/^[-a-zA-Z0-9_.:\/ ]{1,100}$/.test(sku))throw Error('Enter a simple unique bundle SKU');
+  if(!/^\d+(\.\d{1,2})?$/.test(price)||Number(price)<=0)throw Error('Enter a valid bundle price greater than zero');
+  return {title,sku,price:Number(price).toFixed(2)};
+}
+export async function createBundleProduct(shop,token,body,request=graphql){
+  const input=validateBundleInput(body);
+  const created=checked((await request(shop,token,CREATE_PRODUCT,{product:{title:input.title,status:'DRAFT',productType:'Bundle',tags:['Thistle Bundle']}}))?.productCreate,'Create product');
+  const productId=created?.product?.id, variantId=created?.product?.variants?.nodes?.[0]?.id;
+  if(!productId||!variantId)throw Error('Shopify created the product but did not return its default variant');
+  checked((await request(shop,token,UPDATE_VARIANT,{productId,variants:[{id:variantId,price:input.price,inventoryPolicy:'DENY',inventoryItem:{sku:input.sku,tracked:true}}]}))?.productVariantsBulkUpdate,'Update bundle variant');
+  return {productId,parentVariantId:variantId,title:input.title,sku:input.sku,price:input.price,status:'DRAFT'};
+}
+export async function ensureCartTransform(shop,token,request=graphql){
+  const existing=(await request(shop,token,CART_TRANSFORMS))?.cartTransforms?.nodes||[];
+  if(existing.length)return {id:existing[0].id,created:false};
+  const made=checked((await request(shop,token,CREATE_CART_TRANSFORM,{functionHandle:'thistle-preorder-cart-transform',blockOnFailure:true}))?.cartTransformCreate,'Activate checkout bundle transform');
+  if(!made?.cartTransform?.id)throw Error('Shopify did not activate the checkout bundle transform');
+  return {id:made.cartTransform.id,created:true};
+}
+export async function saveLiveBundle(shop,token,body,request=graphql){
+  const parentId=String(body?.parentVariantId||'');
+  if(!/^gid:\/\/shopify\/ProductVariant\/\d+$/.test(parentId))throw Error('Select a valid parent product variant');
+  const releaseDate=String(body?.releaseDate||'').trim();
+  if(releaseDate&&!/^\d{4}-\d{2}-\d{2}$/.test(releaseDate))throw Error('Release date must use YYYY-MM-DD');
+  const components=normaliseComponents(body?.components);
+  encodeLiveComponents(components);
+  if(components.some(c=>c.id===parentId))throw Error('A bundle cannot contain its own parent variant');
+  const details=[];
+  for(let i=0;i<components.length;i+=50){
+    const result=(await request(shop,token,COMPONENTS,{ids:components.slice(i,i+50).map(c=>c.id)}))?.nodes||[];
+    details.push(...result);
+  }
+  const byId=new Map(details.filter(Boolean).map(v=>[v.id,v]));
+  const problems=[];
+  for(const c of components){const v=byId.get(c.id);if(!v)problems.push(`${c.title}: variant not found`);else if(v.requiresComponents)problems.push(`${v.displayName}: nested bundles are not supported`);}
+  if(problems.length)throw Error(problems.slice(0,5).join('; '));
+  const {index,fields}=makePlanShards(components,'a',releaseDate);
+  for(let i=0;i<fields.length;i+=20){
+    const saved=await request(shop,token,SET_METAFIELDS,{metafields:fields.slice(i,i+20).map(f=>({...f,ownerId:parentId,namespace:'tt_preorders'}))});
+    checked(saved?.metafieldsSet,'Save bundle plan');
+  }
+  const liveValue=encodeLiveComponents(components);
+  const saved=await request(shop,token,SET_METAFIELDS,{metafields:[
+    {ownerId:parentId,namespace:'tt_preorders',key:'configuration',type:'json',value:JSON.stringify(index)},
+    {ownerId:parentId,namespace:'tt_preorders',key:'live_components',type:'json',value:liveValue},
+    {ownerId:parentId,namespace:'tt_preorders',key:'live_enabled',type:'boolean',value:'true'},
+  ]});
+  checked(saved?.metafieldsSet,'Activate bundle');
+  await ensureCartTransform(shop,token,request);
+  return {parentVariantId:parentId,components,releaseDate};
+}

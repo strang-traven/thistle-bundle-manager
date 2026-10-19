@@ -2,7 +2,7 @@ import http from 'node:http';
 import {readFile} from 'node:fs/promises';
 import pg from 'pg';
 import {verifyWebhook,verifyIdToken,assertShop,encrypt} from './security.js';
-import {exchangeOfflineToken,fetchBundlePlan} from './shopify.js';
+import {authShopToken,createBundleProduct,exchangeOfflineToken,fetchBundlePlan,saveLiveBundle} from './shopify.js';
 import {enqueue,runWorker} from './worker.js';
 import {fixedBundleParts} from './plan.js';
 const port=Number(process.env.PORT||8080);
@@ -111,6 +111,25 @@ export function makeHandler(database=pool,{getHtml=()=>readFile(htmlPath,'utf8')
         WHERE bundles.mode='PREORDER' RETURNING id`,[shop,bundle.parentVariantId,bundle.parentProductId,bundle.title,bundle.sku,bundle.releaseDate,JSON.stringify(bundle.components)]);
        if(!saved.rowCount)return send(res,409,{error:'Bundle is locked beyond PREORDER; cannot overwrite card list.'});
        return send(res,200,{synced:true,id:saved.rows[0].id,cards:bundle.components.length,parts:fixedBundleParts(bundle.components).length});
+     }
+     if(req.method==='POST'&&url.pathname==='/api/admin/bundle-product'){
+       const body=JSON.parse((await rawBody(req,32768)).toString());
+       const token=await authShopToken(database,shop);
+       return send(res,200,await createBundleProduct(shop,token,body));
+     }
+     if(req.method==='POST'&&url.pathname==='/api/admin/bundle-save'){
+       const body=JSON.parse((await rawBody(req,512*1024)).toString());
+       const token=await authShopToken(database,shop);
+       const bundle=await saveLiveBundle(shop,token,body);
+       const parent=await fetchBundlePlan(shop,token,bundle.parentVariantId);
+       const duplicate=await database.query('SELECT parent_variant_id FROM bundles WHERE shop=$1 AND sku=$2 AND parent_variant_id<>$3',[shop,parent.sku,parent.parentVariantId]);
+       if(duplicate.rowCount)return send(res,409,{error:'The parent SKU is already assigned to another bundle. Use a unique SKU.'});
+       const saved=await database.query(`INSERT INTO bundles(shop,parent_variant_id,parent_product_id,title,sku,release_date,components)
+        VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(shop,parent_variant_id) DO UPDATE SET
+        title=EXCLUDED.title,sku=EXCLUDED.sku,release_date=EXCLUDED.release_date,components=EXCLUDED.components,synced_at=now()
+        WHERE bundles.mode='PREORDER' RETURNING id`,[shop,parent.parentVariantId,parent.parentProductId,parent.title,parent.sku,parent.releaseDate,JSON.stringify(parent.components)]);
+       if(!saved.rowCount)return send(res,409,{error:'Bundle is locked beyond PREORDER; its component list cannot be changed.'});
+       return send(res,200,{saved:true,id:saved.rows[0].id,cards:parent.components.length,status:'DRAFT'});
      }
      if(req.method==='POST'&&url.pathname==='/api/admin/reconcile'){
        const body=JSON.parse((await rawBody(req,2048)).toString());
