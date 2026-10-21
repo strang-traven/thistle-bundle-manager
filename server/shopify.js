@@ -74,6 +74,13 @@ const ACTIVATE_INVENTORY=`mutation ActivateBundleInventory($inventoryItemId:ID!,
 export const SET_INVENTORY=`mutation SetBundleInventory($input:InventorySetQuantitiesInput!){inventorySetQuantities(input:$input){inventoryAdjustmentGroup{createdAt}userErrors{field message code}}}`;
 const PARENT_SETUP=`query BundleParentSetup($id:ID!){productVariant(id:$id){id product{id}}}`;
 const STAGED_PARENT=`query StagedBundleParent($id:ID!){productVariant(id:$id){id sku product{id title status}}}`;
+export async function existingBundleProduct(shop,token,parentId,request=graphql){
+  if(!/^gid:\/\/shopify\/ProductVariant\/\d+$/.test(parentId))throw Error('Select a valid Shopify product');
+  const parent=(await request(shop,token,STAGED_PARENT,{id:parentId}))?.productVariant;
+  if(!parent?.product?.id)throw Error('That Shopify product could not be found');
+  if(!parent.sku?.trim())throw Error('Give this product a unique SKU in Shopify before linking it');
+  return {parentVariantId:parentId,parentProductId:parent.product.id,title:parent.product.title,sku:parent.sku.trim()};
+}
 const COMPONENTS=`query BundleComponents($ids:[ID!]!){nodes(ids:$ids){... on ProductVariant{id displayName requiresComponents inventoryPolicy inventoryItem{tracked}}}}`;
 const SET_METAFIELDS=`mutation SaveBundleFields($metafields:[MetafieldsSetInput!]!){metafieldsSet(metafields:$metafields){metafields{key value}userErrors{field message code}}}`;
 const CART_TRANSFORMS=`query ActiveCartTransforms{cartTransforms(first:10){nodes{id}}}`;

@@ -1,12 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {configureLargeLiveBundle,createBundleProduct,ensureCartTransform,fetchBundlePlan,saveLiveBundle,stageBundlePlan,validateBundleInput} from './shopify.js';
+import {configureLargeLiveBundle,createBundleProduct,ensureCartTransform,existingBundleProduct,fetchBundlePlan,saveLiveBundle,stageBundlePlan,validateBundleInput} from './shopify.js';
 
 const shop='example.myshopify.com', token='token', id=n=>`gid://shopify/ProductVariant/${n}`;
 
 test('bundle product input is normalised and requires the pre-order controls',()=>{
   assert.deepEqual(validateBundleInput({title:' Set ',sku:'SET-1',price:'12.5',preorderLimit:40,releaseDate:'2027-01-02',locationId:'gid://shopify/Location/3'}),{title:'Set',sku:'SET-1',price:'12.50',preorderLimit:40,releaseDate:'2027-01-02',locationId:'gid://shopify/Location/3'});
   assert.throws(()=>validateBundleInput({title:'Set',sku:'SET-1',price:'free'}),/valid bundle price/);
+});
+
+test('an existing Shopify product can be linked without changing its commerce data',async()=>{
+  const calls=[];
+  const request=async(_shop,_token,query,variables)=>{calls.push({query,variables});return {productVariant:{id:id(12),sku:' EXISTING-12 ',product:{id:'gid://shopify/Product/7',title:'Existing Set',status:'ACTIVE'}}};};
+  const result=await existingBundleProduct(shop,token,id(12),request);
+  assert.deepEqual(result,{parentVariantId:id(12),parentProductId:'gid://shopify/Product/7',title:'Existing Set',sku:'EXISTING-12'});
+  assert.equal(calls.length,1);
 });
 
 test('creating a bundle makes an active capped preorder at one location',async()=>{

@@ -2,7 +2,7 @@ import http from 'node:http';
 import {readFile} from 'node:fs/promises';
 import pg from 'pg';
 import {verifyWebhook,verifyIdToken,assertShop,encrypt} from './security.js';
-import {authShopToken,bundleLocations,createBundleProduct,exchangeOfflineToken,fetchBundlePlan,stageBundlePlan} from './shopify.js';
+import {authShopToken,bundleLocations,createBundleProduct,exchangeOfflineToken,existingBundleProduct,fetchBundlePlan,stageBundlePlan} from './shopify.js';
 import {enqueue,runWorker} from './worker.js';
 import {fixedBundleParts} from './plan.js';
 const port=Number(process.env.PORT||8080);
@@ -120,6 +120,26 @@ export function makeHandler(database=pool,{getHtml=()=>readFile(htmlPath,'utf8')
        const saved=await database.query(`INSERT INTO bundles(shop,parent_variant_id,parent_product_id,title,sku,release_date,preorder_limit,location_id)
          VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,[shop,created.parentVariantId,created.productId,created.title,created.sku,created.releaseDate,created.preorderLimit,created.locationId]);
        return send(res,200,{...created,id:saved.rows[0].id});
+     }
+     if(req.method==='POST'&&url.pathname==='/api/admin/bundle-link'){
+       const body=JSON.parse((await rawBody(req,32768)).toString());
+       const preorderLimit=Number(body.preorderLimit),releaseDate=String(body.releaseDate||'').trim(),locationId=String(body.locationId||'');
+       if(!Number.isSafeInteger(preorderLimit)||preorderLimit<1||preorderLimit>100000)return send(res,400,{error:'Enter a pre-order limit between 1 and 100,000'});
+       if(!/^\d{4}-\d{2}-\d{2}$/.test(releaseDate))return send(res,400,{error:'Enter the expected release date'});
+       if(!/^gid:\/\/shopify\/Location\/\d+$/.test(locationId))return send(res,400,{error:'Select an inventory location'});
+       const token=await authShopToken(database,shop);
+       const locations=await bundleLocations(shop,token);
+       if(!locations.some(location=>location.id===locationId))return send(res,400,{error:'That Shopify location is unavailable'});
+       const parent=await existingBundleProduct(shop,token,String(body.parentVariantId||''));
+       const duplicate=await database.query('SELECT parent_variant_id FROM bundles WHERE shop=$1 AND sku=$2 AND parent_variant_id<>$3',[shop,parent.sku,parent.parentVariantId]);
+       if(duplicate.rowCount)return send(res,409,{error:'That SKU is already assigned to another bundle'});
+       const saved=await database.query(`INSERT INTO bundles(shop,parent_variant_id,parent_product_id,title,sku,release_date,preorder_limit,location_id)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(shop,parent_variant_id) DO UPDATE SET
+        title=EXCLUDED.title,sku=EXCLUDED.sku,release_date=EXCLUDED.release_date,preorder_limit=EXCLUDED.preorder_limit,
+        location_id=EXCLUDED.location_id,synced_at=now() WHERE bundles.mode='PREORDER' RETURNING id,components`,
+        [shop,parent.parentVariantId,parent.parentProductId,parent.title,parent.sku,releaseDate,preorderLimit,locationId]);
+       if(!saved.rowCount)return send(res,409,{error:'This bundle is locked because allocation or live selling has already started'});
+       return send(res,200,{...parent,id:saved.rows[0].id,preorderLimit,releaseDate,locationId,components:saved.rows[0].components||[]});
      }
      if(req.method==='GET'&&url.pathname==='/api/admin/locations'){
        const token=await authShopToken(database,shop);
